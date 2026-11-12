@@ -3,7 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Decibel Meter</title>
+<meta name="theme-color" content="#0d1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DBmeter">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>DBmeter</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -44,9 +52,10 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 8px 10px;
-    font-size: 14px;
+    padding: 8px 8px;
+    font-size: 13px;
   }
+  .header-selects { display: flex; gap: 8px; }
   .card {
     width: 100%;
     max-width: 480px;
@@ -136,11 +145,19 @@
 <body>
   <header>
     <h1>Decibel Meter</h1>
-    <select id="weighting" aria-label="Frequency weighting">
-      <option value="A" selected>A (dBA)</option>
-      <option value="C">C (dBC)</option>
-      <option value="Z">Z (dBZ)</option>
-    </select>
+    <div class="header-selects">
+      <select id="response" aria-label="Response time">
+        <option value="0.125" selected>Fast (0.125 s)</option>
+        <option value="0.5">Medium (0.5 s)</option>
+        <option value="1">Slow (1 s)</option>
+        <option value="3">Very slow (3 s)</option>
+      </select>
+      <select id="weighting" aria-label="Frequency weighting">
+        <option value="A" selected>A (dBA)</option>
+        <option value="C">C (dBC)</option>
+        <option value="Z">Z (dBZ)</option>
+      </select>
+    </div>
   </header>
 
   <button id="startBtn">Start Measuring</button>
@@ -197,11 +214,12 @@
   var FFT_SIZE = 8192;
   var MIN_DB = 20, MAX_DB = 120;
   var HISTORY_SECONDS = 60;
-  var DISPLAY_SMOOTHING = 0.35;
   var PEAK_DECAY_PER_SEC = 10;
 
   var startBtn = document.getElementById("startBtn");
   var weightingSel = document.getElementById("weighting");
+  var responseSel = document.getElementById("response");
+  var processingNote = "";
   var dbValue = document.getElementById("dbValue");
   var dbUnit = document.getElementById("dbUnit");
   var statusEl = document.getElementById("status");
@@ -225,6 +243,7 @@
   var state = {
     offset: 100,
     display: 0,
+    powerAvg: null,
     peak: 0,
     max: null,
     min: null,
@@ -241,12 +260,21 @@
     }
   } catch (e) {}
 
+  try {
+    var savedResponse = localStorage.getItem("dbmeter_response");
+    if (savedResponse !== null) responseSel.value = savedResponse;
+  } catch (e) {}
+
   offsetValue.textContent = state.offset.toFixed(1) + " dB";
 
   offsetInput.addEventListener("input", function () {
     state.offset = parseFloat(offsetInput.value);
     offsetValue.textContent = state.offset.toFixed(1) + " dB";
     try { localStorage.setItem("dbmeter_offset", String(state.offset)); } catch (e) {}
+  });
+
+  responseSel.addEventListener("change", function () {
+    try { localStorage.setItem("dbmeter_response", responseSel.value); } catch (e) {}
   });
 
   function aWeightDb(f) {
@@ -408,11 +436,15 @@
 
     var level = computeLevel();
     if (level !== null) {
-      state.display = state.display === 0
-        ? level
-        : state.display + (level - state.display) * DISPLAY_SMOOTHING;
+      var p = Math.pow(10, level / 10);
+      var tau = parseFloat(responseSel.value);
+      var alpha = 1 - Math.exp(-dt / tau);
+      state.powerAvg = state.powerAvg === null
+        ? p
+        : state.powerAvg + alpha * (p - state.powerAvg);
+      state.display = 10 * Math.log10(state.powerAvg);
       updateStats(level);
-      state.history.push({ t: performance.now(), v: level });
+      state.history.push({ t: performance.now(), v: state.display });
       var cutoff = performance.now() - HISTORY_SECONDS * 1000;
       while (state.history.length > 1 && state.history[0].t < cutoff) state.history.shift();
 
@@ -422,10 +454,10 @@
       dbUnit.textContent = " dB" + suffix;
       dbValue.style.color = zoneColor(shown);
       if (shown >= 85) {
-        statusEl.textContent = "Loud — risk of hearing damage with prolonged exposure";
+        statusEl.textContent = "Loud — risk of hearing damage with prolonged exposure" + processingNote;
         statusEl.className = "warn";
       } else {
-        statusEl.textContent = "Measuring…";
+        statusEl.textContent = "Measuring…" + processingNote;
         statusEl.className = "";
       }
     }
@@ -436,6 +468,7 @@
 
   function stop() {
     running = false;
+    processingNote = "";
     cancelAnimationFrame(rafId);
     if (audioCtx) {
       audioCtx.close();
@@ -463,6 +496,19 @@
       }
     };
     navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+      var track = stream.getAudioTracks()[0];
+      if (track && track.applyConstraints) {
+        track.applyConstraints({
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }).then(function () {
+          var s = track.getSettings ? track.getSettings() : {};
+          if (s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
+            processingNote = " — device audio processing active";
+          }
+        }).catch(function () {});
+      }
       var Ctx = window.AudioContext || window.webkitAudioContext;
       audioCtx = new Ctx();
       return audioCtx.resume().then(function () { return stream; });
@@ -475,8 +521,10 @@
       freqData = new Float32Array(analyser.frequencyBinCount);
       weights = buildWeights(audioCtx.sampleRate, analyser.frequencyBinCount);
       state.display = 0;
+      state.powerAvg = null;
       state.peak = 0;
       state.history = [];
+      processingNote = "";
       running = true;
       lastFrameTime = performance.now();
       startBtn.textContent = "Stop";
@@ -512,6 +560,10 @@
   });
 
   resetBtn.addEventListener("click", resetStats);
+
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    navigator.serviceWorker.register("sw.js").catch(function () {});
+  }
 })();
 </script>
 </body>
