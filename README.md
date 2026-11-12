@@ -10,6 +10,7 @@ A browser-based sound level meter that uses your phone's (or laptop's) microphon
 - Session stats: **Max / Min / Leq** (energy-equivalent average)
 - Rolling 60-second history graph with 70/85 dB reference lines
 - Adjustable calibration offset, saved on your device
+- **Microphone selection**: pick between your phone's built-in mics or an external microphone (USB-C or headset); the list refreshes automatically when devices are plugged in
 - Installable as an app (PWA) and usable offline
 
 ## Run it
@@ -26,6 +27,8 @@ Browsers only allow microphone access over **HTTPS** (or `localhost`).
 - **iPhone (Safari):** open the site → Share button → **Add to Home Screen**
 
 The installed app runs fullscreen from its own icon and works offline (the service worker caches everything; it needs connectivity only the first time, and to fetch updates).
+
+**Using an external microphone:** plug it in (USB-C mic, or a wired/wireless headset), pick it in the **Microphone** list, and the app switches to it immediately. Each microphone has its own sensitivity, so re-check your calibration offset when you switch devices. Note that some phones route USB mics through their voice-processing pipeline; if the status line shows "device audio processing active", readings may be affected.
 
 **Locally:**
 
