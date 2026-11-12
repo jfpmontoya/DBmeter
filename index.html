@@ -3,7 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Decibel Meter</title>
+<meta name="theme-color" content="#0d1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DBmeter">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>DBmeter</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -44,9 +52,12 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 8px 10px;
-    font-size: 14px;
+    padding: 8px 8px;
+    font-size: 13px;
   }
+  .header-selects { display: flex; gap: 8px; }
+  #micSelect { width: 100%; font-size: 14px; padding: 10px; }
+  .mic-hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.4; }
   .card {
     width: 100%;
     max-width: 480px;
@@ -136,14 +147,33 @@
 <body>
   <header>
     <h1>Decibel Meter</h1>
-    <select id="weighting" aria-label="Frequency weighting">
-      <option value="A" selected>A (dBA)</option>
-      <option value="C">C (dBC)</option>
-      <option value="Z">Z (dBZ)</option>
-    </select>
+    <div class="header-selects">
+      <select id="response" aria-label="Response time">
+        <option value="0.125" selected>Fast (0.125 s)</option>
+        <option value="0.5">Medium (0.5 s)</option>
+        <option value="1">Slow (1 s)</option>
+        <option value="3">Very slow (3 s)</option>
+      </select>
+      <select id="weighting" aria-label="Frequency weighting">
+        <option value="A" selected>A (dBA)</option>
+        <option value="C">C (dBC)</option>
+        <option value="Z">Z (dBZ)</option>
+      </select>
+    </div>
   </header>
 
   <button id="startBtn">Start Measuring</button>
+
+  <div class="card">
+    <h2>Microphone</h2>
+    <select id="micSelect">
+      <option value="">Default microphone</option>
+    </select>
+    <p class="mic-hint">
+      Start measuring once to load device names. Plugging in an external
+      microphone (USB-C or headset) updates this list automatically.
+    </p>
+  </div>
 
   <div class="card">
     <div id="readout">
@@ -197,11 +227,12 @@
   var FFT_SIZE = 8192;
   var MIN_DB = 20, MAX_DB = 120;
   var HISTORY_SECONDS = 60;
-  var DISPLAY_SMOOTHING = 0.35;
   var PEAK_DECAY_PER_SEC = 10;
 
   var startBtn = document.getElementById("startBtn");
   var weightingSel = document.getElementById("weighting");
+  var responseSel = document.getElementById("response");
+  var processingNote = "";
   var dbValue = document.getElementById("dbValue");
   var dbUnit = document.getElementById("dbUnit");
   var statusEl = document.getElementById("status");
@@ -213,6 +244,9 @@
   var offsetValue = document.getElementById("offsetValue");
   var meterCanvas = document.getElementById("meter");
   var historyCanvas = document.getElementById("history");
+  var micSelect = document.getElementById("micSelect");
+  var selectedDeviceId = "";
+  var activeDeviceId = "";
 
   var audioCtx = null;
   var analyser = null;
@@ -225,6 +259,7 @@
   var state = {
     offset: 100,
     display: 0,
+    powerAvg: null,
     peak: 0,
     max: null,
     min: null,
@@ -241,12 +276,22 @@
     }
   } catch (e) {}
 
+  try {
+    var savedResponse = localStorage.getItem("dbmeter_response");
+    if (savedResponse !== null) responseSel.value = savedResponse;
+    selectedDeviceId = localStorage.getItem("dbmeter_mic") || "";
+  } catch (e) {}
+
   offsetValue.textContent = state.offset.toFixed(1) + " dB";
 
   offsetInput.addEventListener("input", function () {
     state.offset = parseFloat(offsetInput.value);
     offsetValue.textContent = state.offset.toFixed(1) + " dB";
     try { localStorage.setItem("dbmeter_offset", String(state.offset)); } catch (e) {}
+  });
+
+  responseSel.addEventListener("change", function () {
+    try { localStorage.setItem("dbmeter_response", responseSel.value); } catch (e) {}
   });
 
   function aWeightDb(f) {
@@ -408,11 +453,15 @@
 
     var level = computeLevel();
     if (level !== null) {
-      state.display = state.display === 0
-        ? level
-        : state.display + (level - state.display) * DISPLAY_SMOOTHING;
+      var p = Math.pow(10, level / 10);
+      var tau = parseFloat(responseSel.value);
+      var alpha = 1 - Math.exp(-dt / tau);
+      state.powerAvg = state.powerAvg === null
+        ? p
+        : state.powerAvg + alpha * (p - state.powerAvg);
+      state.display = 10 * Math.log10(state.powerAvg);
       updateStats(level);
-      state.history.push({ t: performance.now(), v: level });
+      state.history.push({ t: performance.now(), v: state.display });
       var cutoff = performance.now() - HISTORY_SECONDS * 1000;
       while (state.history.length > 1 && state.history[0].t < cutoff) state.history.shift();
 
@@ -422,10 +471,10 @@
       dbUnit.textContent = " dB" + suffix;
       dbValue.style.color = zoneColor(shown);
       if (shown >= 85) {
-        statusEl.textContent = "Loud — risk of hearing damage with prolonged exposure";
+        statusEl.textContent = "Loud — risk of hearing damage with prolonged exposure" + processingNote;
         statusEl.className = "warn";
       } else {
-        statusEl.textContent = "Measuring…";
+        statusEl.textContent = "Measuring…" + processingNote;
         statusEl.className = "";
       }
     }
@@ -436,6 +485,7 @@
 
   function stop() {
     running = false;
+    processingNote = "";
     cancelAnimationFrame(rafId);
     if (audioCtx) {
       audioCtx.close();
@@ -454,6 +504,14 @@
       statusEl.textContent = "Microphone access not supported in this browser";
       return;
     }
+    openMic().catch(function (err) {
+      statusEl.textContent = err && err.name === "NotAllowedError"
+        ? "Microphone permission denied"
+        : "Could not open microphone: " + (err && err.message ? err.message : err);
+    });
+  }
+
+  function openMic() {
     var constraints = {
       audio: {
         echoCancellation: false,
@@ -462,7 +520,23 @@
         channelCount: 1
       }
     };
-    navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+    if (selectedDeviceId) constraints.audio.deviceId = { exact: selectedDeviceId };
+    return navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+      var track = stream.getAudioTracks()[0];
+      var initial = track && track.getSettings ? track.getSettings() : {};
+      activeDeviceId = initial.deviceId || selectedDeviceId || "";
+      if (track && track.applyConstraints) {
+        track.applyConstraints({
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false
+        }).then(function () {
+          var s = track.getSettings ? track.getSettings() : {};
+          if (s.echoCancellation || s.noiseSuppression || s.autoGainControl) {
+            processingNote = " — device audio processing active";
+          }
+        }).catch(function () {});
+      }
       var Ctx = window.AudioContext || window.webkitAudioContext;
       audioCtx = new Ctx();
       return audioCtx.resume().then(function () { return stream; });
@@ -475,18 +549,17 @@
       freqData = new Float32Array(analyser.frequencyBinCount);
       weights = buildWeights(audioCtx.sampleRate, analyser.frequencyBinCount);
       state.display = 0;
+      state.powerAvg = null;
       state.peak = 0;
       state.history = [];
+      processingNote = "";
+      populateMics();
       running = true;
       lastFrameTime = performance.now();
       startBtn.textContent = "Stop";
       startBtn.classList.add("stop");
       statusEl.textContent = "Measuring…";
       rafId = requestAnimationFrame(loop);
-    }).catch(function (err) {
-      statusEl.textContent = err && err.name === "NotAllowedError"
-        ? "Microphone permission denied"
-        : "Could not open microphone: " + (err && err.message ? err.message : err);
     });
   }
 
@@ -512,6 +585,56 @@
   });
 
   resetBtn.addEventListener("click", resetStats);
+
+  function populateMics() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    navigator.mediaDevices.enumerateDevices().then(function (devices) {
+      var mics = devices.filter(function (d) { return d.kind === "audioinput"; });
+      micSelect.textContent = "";
+      var defaultOpt = document.createElement("option");
+      defaultOpt.value = "";
+      defaultOpt.textContent = "Default microphone";
+      micSelect.appendChild(defaultOpt);
+      mics.forEach(function (d, i) {
+        var opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.textContent = d.label || ("Microphone " + (i + 1));
+        micSelect.appendChild(opt);
+      });
+      micSelect.value = activeDeviceId || selectedDeviceId || "";
+      if (micSelect.selectedIndex === -1) micSelect.value = "";
+    });
+  }
+
+  micSelect.addEventListener("change", function () {
+    selectedDeviceId = micSelect.value;
+    try { localStorage.setItem("dbmeter_mic", selectedDeviceId); } catch (e) {}
+    if (!running) return;
+    cancelAnimationFrame(rafId);
+    if (audioCtx) {
+      audioCtx.close();
+      audioCtx = null;
+    }
+    state.display = 0;
+    state.powerAvg = null;
+    state.peak = 0;
+    openMic().catch(function (err) {
+      running = false;
+      startBtn.textContent = "Start Measuring";
+      startBtn.classList.remove("stop");
+      statusEl.textContent = "Could not open microphone: " + (err && err.message ? err.message : err);
+    });
+  });
+
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener("devicechange", populateMics);
+  }
+
+  populateMics();
+
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    navigator.serviceWorker.register("sw.js").catch(function () {});
+  }
 })();
 </script>
 </body>
